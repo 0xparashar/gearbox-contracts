@@ -4,6 +4,7 @@
 pragma solidity ^0.7.4;
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IUniswapV2Router02} from "../integrations/uniswap/IUniswapV2Router02.sol";
+import {IUniswapV2Factory} from "../integrations/uniswap/IUniswapV2Factory.sol";
 import {ICreditFilter} from "../interfaces/ICreditFilter.sol";
 import {ICreditManager} from "../interfaces/ICreditManager.sol";
 import {CreditManager} from "../credit/CreditManager.sol";
@@ -221,7 +222,7 @@ contract UniswapV2Adapter is IUniswapV2Router02, ReentrancyGuard {
         revert(Errors.NOT_IMPLEMENTED);
     }
 
-    function factory() external view override returns (address) {
+    function factory() public view override returns (address) {
         return IUniswapV2Router02(router).factory();
     }
 
@@ -230,25 +231,90 @@ contract UniswapV2Adapter is IUniswapV2Router02, ReentrancyGuard {
     }
 
     function addLiquidity(
-        address, // tokenA,
-        address, // tokenB,
-        uint256, // amountADesired,
-        uint256, // amountBDesired,
-        uint256, // amountAMin,
-        uint256, // amountBMin,
-        address, // to,
-        uint256 // deadline
+        address tokenA,
+        address tokenB,
+        uint256 amountADesired,
+        uint256 amountBDesired,
+        uint256 amountAMin,
+        uint256 amountBMin,
+        address,
+        uint256 deadline
     )
         external
-        pure
         override
+        nonReentrant
         returns (
-            uint256,
-            uint256,
-            uint256
+            uint256 amountA,
+            uint256 amountB,
+            uint256 liquidity
         )
     {
-        revert(Errors.NOT_IMPLEMENTED);
+        address creditAccount = creditManager.getCreditAccountOrRevert(
+            msg.sender
+        );
+
+        // to avoid stack too deep error, using array of all uint256 inputs
+        uint256[5] memory amountInputs = [amountADesired, amountBDesired, amountAMin, amountBMin, deadline];
+        address[] memory tokenIn = new address[](2);
+        tokenIn[0] = tokenA;
+        tokenIn[1] = tokenB;
+
+        creditManager.provideCreditAccountAllowance(
+            creditAccount,
+            router,
+            tokenIn[0]
+        );
+
+        creditManager.provideCreditAccountAllowance(
+            creditAccount,
+            router,
+            tokenIn[1]
+        );
+
+        address[] memory tokenOut = new address[](1);
+        tokenOut[0] = IUniswapV2Factory(factory()).getPair(tokenIn[0], tokenIn[1]);
+
+        uint256[] memory balanceInBefore = new uint256[](2);
+        balanceInBefore[0] = IERC20(tokenIn[0]).balanceOf(creditAccount);
+        balanceInBefore[1] = IERC20(tokenIn[1]).balanceOf(creditAccount);
+
+        uint256 balanceOutBefore = IERC20(tokenOut[0]).balanceOf(creditAccount);
+        
+        bytes memory data = abi.encodeWithSelector(
+            bytes4(0xe8e33700), // "addLiquidity(address,address,uint256,uint256,uint256,uint256,address,uint256)",
+            tokenIn[0],
+            tokenIn[1],
+            amountInputs[0],
+            amountInputs[1],
+            amountInputs[2],
+            amountInputs[3],
+            creditAccount,
+            amountInputs[4]
+        );
+
+        (amountA, amountB, liquidity) = abi.decode(
+            creditManager.executeOrder(msg.sender, router, data),
+            (uint256, uint256, uint256)
+        );
+    
+
+        uint256[] memory amountIn = new uint256[](2);
+        
+        for(uint i; i<2; i++){
+            amountIn[i] = balanceInBefore[i].sub(IERC20(tokenIn[i]).balanceOf(creditAccount));
+        }
+
+        uint256[] memory amountOut = new uint256[](1);
+        amountOut[0] = IERC20(tokenOut[0]).balanceOf(creditAccount).sub(balanceOutBefore);
+
+        creditFilter.checkMultiTokenCollateral(
+            creditAccount,
+            amountIn,
+            amountOut,
+            tokenIn,
+            tokenOut
+        );
+
     }
 
     function addLiquidityETH(
@@ -272,15 +338,71 @@ contract UniswapV2Adapter is IUniswapV2Router02, ReentrancyGuard {
     }
 
     function removeLiquidity(
-        address, // tokenA,
-        address, // tokenB,
-        uint256, // liquidity,
-        uint256, // amountAMin,
-        uint256, // amountBMin,
+        address tokenA,
+        address tokenB,
+        uint256 liquidity,
+        uint256 amountAMin,
+        uint256 amountBMin,
         address, // to,
-        uint256 // deadline
-    ) external pure override returns (uint256, uint256) {
-        revert(Errors.NOT_IMPLEMENTED);
+        uint256 deadline
+    ) external override returns (uint256 amountA, uint256 amountB) {
+
+        address creditAccount = creditManager.getCreditAccountOrRevert(
+            msg.sender
+        );
+
+        address[] memory tokenOut = new address[](2);
+        tokenOut[0] = tokenA;
+        tokenOut[1] = tokenB;
+
+        address[] memory tokenIn = new address[](1);
+        tokenIn[0] = IUniswapV2Factory(factory()).getPair(tokenOut[0], tokenOut[1]);
+
+        creditManager.provideCreditAccountAllowance(
+            creditAccount,
+            router,
+            tokenIn[0]
+        );
+
+        uint256[] memory balanceOutBefore = new uint256[](2);
+        balanceOutBefore[0] = IERC20(tokenOut[0]).balanceOf(creditAccount);
+        balanceOutBefore[1] = IERC20(tokenOut[1]).balanceOf(creditAccount);
+
+        uint256 balanceInBefore = IERC20(tokenIn[0]).balanceOf(creditAccount);
+
+        bytes memory data = abi.encodeWithSelector(
+            bytes4(0xbaa2abde), // "removeLiquidity(address,address,uint256,uint256,uint256,address,uint256)",
+            tokenOut[0],
+            tokenOut[1],
+            liquidity,
+            amountAMin,
+            amountBMin,
+            creditAccount,
+            deadline
+        );
+
+        (amountA, amountB) = abi.decode(
+            creditManager.executeOrder(msg.sender, router, data),
+            (uint256, uint256)
+        );
+
+        uint256[] memory amountOut = new uint256[](2);
+        
+        for(uint i; i<2; i++){
+            amountOut[i] = IERC20(tokenOut[i]).balanceOf(creditAccount).sub(balanceOutBefore[i]);
+        }
+
+        uint256[] memory amountIn = new uint256[](1);
+        amountIn[0] = balanceInBefore.sub(IERC20(tokenIn[0]).balanceOf(creditAccount));
+
+        creditFilter.checkMultiTokenCollateral(
+            creditAccount,
+            amountIn,
+            amountOut,
+            tokenIn,
+            tokenOut
+        );
+
     }
 
     function removeLiquidityETH(

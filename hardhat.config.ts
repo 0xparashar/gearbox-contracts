@@ -33,7 +33,8 @@ const config: HardhatUserConfig = {
       initialBaseFeePerGas: 0,
     },
     localhost: {
-
+      url: "http://localhost:8545",
+      timeout: 400000
     },
     mainnet: {
       url: process.env.ETH_MAINNET_PROVIDER,
